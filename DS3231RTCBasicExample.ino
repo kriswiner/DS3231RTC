@@ -60,6 +60,8 @@ Adafruit_PCD8544 display = Adafruit_PCD8544(9, 8, 7, 5, 6);
 #define MSB_TEMP           0x11
 #define LSB_TEMP           0x12
 
+#define AT24C32_ADDRESS    0x57  // On-board 32k byte EEPROM; 128 pages of 32 bytes each
+
 // Using the GY-521 breakout board, I set ADO to 0 by grounding through a 4k7 resistor
 // Seven-bit device address is 110100 for ADO = 0 and 110101 for ADO = 1
 #define ADO 0
@@ -125,7 +127,7 @@ void setup()
   // Set hour, AM/PM (PM = bit 5 = 1), 12-hour display (bit 6 = 1) or 24-hour display (bit 6 = 0)
   writeByte(DS3231_ADDRESS, HOUR, 0x05 | 0x20 | 0x40);
   // Set date
-  writeByte(DS3231_ADDRESS, DATE, 0x11);
+  writeByte(DS3231_ADDRESS, DATE, 0x19);
   // Set day
   writeByte(DS3231_ADDRESS, DAY, 0x07);
   // Set month
@@ -159,6 +161,40 @@ void setup()
   c = readByte(DS3231_ADDRESS, ALARM_2_DAY_DATE);
   writeByte(DS3231_ADDRESS, ALARM_2_DAY_DATE, c | 0x80);
   
+ /*
+This sketch uses a speaker to play songs when the alarm triggers or the hours strike.
+The Arduino's tone() command will play notes of a given frequency.
+We'll provide a function that takes in note characters (a-g),
+and returns the corresponding frequency from this table:
+
+  note 	frequency
+  c     131 Hz
+  d     147 Hz
+  e     165 Hz
+  f     174 Hz
+  g     196 Hz
+  a     220 Hz
+  b     247 Hz
+ only notes up to 255 Hz can be encoded in a single byte!
+ The AT24C32 can store 128 32-byte songs, one for each 24 hours in the day and plenty left over for alarms!
+
+For more information, see http://arduino.cc/en/Tutorial/Tone
+ 
+  // Test to see if we can write a 32-byte page to the 4K-byte EEPROM and read it again 
+  // Once the data are on the EEPROM, they don't have tp be written again, but can be read over and over.
+  uint8_t song1[32] = {131, 131, 131, 131, 147, 147, 147, 147, 196, 196, 196, 196, 220, 220, 220, 220, 131, 131, 131, 131, 147, 147, 147, 147, 196, 196, 196, 196, 131, 131, 131, 131};
+  // Test to see if we can write a 32-byte page to the 4K-byte EEPROM and read it again 
+  uint8_t page = 1;  // write to page 64 out of 127 (0 - 127 pages available)
+  uint8_t entry = 0;  // start with entry 0 of 31 ( 0 - 31 byte locations per page)
+  for (int ii = 0; ii < 32; ii++) {  // write the whole page
+  writeEEPROM(AT24C32_ADDRESS, page, entry, song1[ii]);  
+  entry++;
+  }
+  for (int entry = 0; entry < 32; entry++) {
+  uint8_t data = readEEPROM(AT24C32_ADDRESS, page, entry);
+  Serial.print("page = "); Serial.print(page); Serial.print("  entry = "); Serial.print(entry); Serial.print("  data = "); Serial.println(data); 
+  }
+ */ 
 }
 
 void loop()
@@ -166,29 +202,36 @@ void loop()
    // If device is not busy, read time, date, and temperature
    byte c = readByte(DS3231_ADDRESS, STATUS) & 0x04;
    if(!c) {  // if device not busy
+
   // These interrupts require constant polling of the STATUS register which takes a lot of time, 
   // which the microcontroller might not be able to spare. If the micrcontroller has a lot of other things to do
   // or we want to save power by only waking up the microcontroller when something requires its attention, use the 
   // hardware interrupt routine alarmChange().
-   c = readByte(DS3231_ADDRESS, STATUS);
-   if(c & 0x01) {                // If Alarm1 flag set, take some action
-     digitalWrite(outPin1, HIGH);
-     analogWrite(outPin2, 64);  delay(100);
-     analogWrite(outPin2, 128); delay(100);
-     analogWrite(outPin2, 192); delay(100);
-     analogWrite(outPin2, 255); delay(100);
-     analogWrite(outPin2, 0); 
-     digitalWrite(outPin1, LOW);
+   c = readByte(DS3231_ADDRESS, STATUS);           // Read STATUS register of DS3231 RTC
+   if(c & 0x01) {                                  // If Alarm1 flag set, take some action
+     digitalWrite(outPin1, HIGH);                  // Turn on extenal LED
+
+  // play song1
+     for (uint8_t entry = 0; entry < 32; entry++) {
+       uint8_t data = readEEPROM(AT24C32_ADDRESS, 1, entry);
+       tone(outPin2, data, 50);  delay(50);
+     }
+     noTone(outPin2);                              // End song1
+
+     digitalWrite(outPin1, LOW);                   // Turn off external LED
      writeByte(DS3231_ADDRESS, STATUS, c & ~0x01); // clear Alarm 1 flag if already set
    }
-   if(c & 0x02) {                // If Alarm 2 flag set, take some action
-     digitalWrite(outPin1, HIGH);
-     analogWrite(outPin2, 64);  delay(100);
-     analogWrite(outPin2, 128); delay(100);
-     analogWrite(outPin2, 192); delay(100);
-     analogWrite(outPin2, 255); delay(100);
-     analogWrite(outPin2, 0); 
-     digitalWrite(outPin1, LOW);
+   if(c & 0x02) {                                  // If Alarm 2 flag set, take some action
+     digitalWrite(outPin1, HIGH);                  // Turn on extenal LED
+
+  // play song1
+     for (uint8_t entry = 0; entry < 32; entry++) {
+       uint8_t data = readEEPROM(AT24C32_ADDRESS, 1, entry);
+       tone(outPin2, data, 50); delay(50); 
+     }
+     noTone(outPin2);                              // End song1
+     
+     digitalWrite(outPin1, LOW);                   // Turn off extenal LED
      writeByte(DS3231_ADDRESS, STATUS, c & ~0x02); // clear Alarm 2 flag if already set
    }
 
@@ -247,6 +290,45 @@ void loop()
 //===================================================================================================================
 //====== Set of useful function to access acceleratio, gyroscope, and temperature data
 //===================================================================================================================
+// Write one byte to the EEPROM
+  void writeEEPROM(uint8_t EEPROMaddress, uint8_t page, uint8_t entry, uint8_t data)
+  {
+    // Construct EEPROM address from page and entry input
+    // There are 128 pages and 32 entries (bytes) per page
+    // EEPROM address are 16-bit (2 byte) address where the MS four bits are zero (or don't care)
+    // the next seven MS bits are the page and the last five LS bits are the entry location on the page
+    uint16_t pageEntryAddress = (uint16_t) ((uint16_t) page << 5) | entry;
+    uint8_t  highAddressByte  = (uint8_t) (pageEntryAddress >> 8);  // byte with the four MSBits of the address
+    uint8_t  lowAddressByte   = (uint8_t) (pageEntryAddress - ((uint16_t) highAddressByte << 8)); // byte with the eight LSbits of the address
+    
+    Wire.beginTransmission(EEPROMaddress);    // Initialize the Tx buffer
+    Wire.write(highAddressByte);              // Put slave register address 1 in Tx buffer
+    Wire.write(lowAddressByte);               // Put slave register address 2 in Tx buffer
+    Wire.write(data);                         // Put data in Tx buffer
+    delay(10);                                // maximum write cycle time per data sheet
+    Wire.endTransmission();                   // Send the Tx buffer
+    delay(10);
+  }
+
+// Read one byte from the EEPROM
+    uint8_t readEEPROM(uint8_t EEPROMaddress, uint8_t page, uint8_t entry)
+{
+    uint16_t pageEntryAddress = (uint16_t) ((uint16_t) page << 5) | entry;
+    uint8_t  highAddressByte  = (uint8_t) (pageEntryAddress >> 8);  // byte with the four MSBits of the address
+    uint8_t  lowAddressByte   = (uint8_t) (pageEntryAddress - ((uint16_t)highAddressByte << 8)); // byte with the eight LSbits of the address
+
+    uint8_t data;                                    // `data` will store the register data	 
+    Wire.beginTransmission(EEPROMaddress);           // Initialize the Tx buffer
+    Wire.write(highAddressByte);                     // Put slave register address 1 in Tx buffer
+    Wire.write(lowAddressByte);                      // Put slave register address 2 in Tx buffer
+    Wire.endTransmission(false);                     // Send the Tx buffer, but send a restart to keep connection alive
+    Wire.requestFrom(EEPROMaddress, (uint8_t) 1);    // Read one byte from slave register address 
+    delay(10);                                       // maximum write cycle time per data sheet
+    data = Wire.read();                              // Fill Rx buffer with result
+    delay(10);
+    return data;                                     // Return data read from slave register
+}
+
    void alarmChange()  // If either Alarm is triggered, take some action
    {
    display.setCursor(66,0); display.print("AL"); 
